@@ -1,0 +1,43 @@
+const drawPageHeader = () => {
+        y = 14
+        const logoX = margin
+        const logoY = y
+        const logoHeight = 15
+        const logoWidth = logoHeight * LOGO_ASPECT
+        pdf.addImage(logoDataUrl, 'PNG', logoX, logoY, logoWidth, logoHeight)
+
+        pdf.setTextColor(...TEXT)
+        pdf.setFont('helvetica', 'normal')
+        pdf.setFontSize(4.5)
+        COMPANY.companies.forEach((company, index) => {
+            pdf.text(company, logoX + logoWidth + 3, y + 2 + index * 4)
+        })
+
+        setFont(7, false)
+        pdf.text('Quotation #', pageWidth - 43, y + 19, { align: 'right' })
+        setFont(7, true)
+        pdf.text(data.quotationNo || 'DRAFT', pageWidth - margin, y + 19, { align: 'right' })
+        setFont(7, false)
+        pdf.text('Date:', pageWidth - 43, y + 23, { align: 'right' })
+        pdf.text(formatDate(data.quotationDate), pageWidth - margin, y + 23, { align: 'right' })
+
+        setFont(13, false)
+        pdf.text(`${data.customerName || '-'} / Quotation`, margin + 1, y + 23)
+
+        const barY = y + 25
+        pdf.setFillColor(...NAVY)
+        pdf.rect(margin, barY, contentWidth, 7, 'F')
+        pdf.setTextColor(255, 255, 255)
+        pdf.setFont('helvetica', 'bold')
+        pdf.setFontSize(7)
+        pdf.text('Job Description', pageWidth / 2, barY + 4.8, { align: 'center' })
+
+        const jobBoxY = barY + 7
+        pdf.setDrawColor(...BORDER)
+        pdf.setLineWidth(OUTER_LINE)
+        pdf.rect(margin, jobBoxY, contentWidth, 10)
+        setFont(8, true)
+        pdf.text(data.jobDescription || data.projectName || '-', pageWidth / 2, jobBoxY + 6.5, { align: 'center' })
+
+        y = jobBoxY + 10
+    }
