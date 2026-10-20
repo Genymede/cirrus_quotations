@@ -82,6 +82,44 @@ export function setToken(next: string | null): void {
   }
 }
 
+// claude_prompt.txt ("SSO: opening a direct link to another app asks for
+// login again"): sessionStorage (used above) is per-tab even within the
+// same origin -- a direct/bookmarked/pasted visit, or a plain new tab,
+// never has it, fragment or not. Callers (App.tsx, CostAndProfitPage.tsx)
+// call this once on boot when getToken() is still null: it asks
+// ems-backend's GET /auth/sso whether the browser holds a valid shared
+// session cookie (verified server-side there, never trusted client-side
+// here), and on success stores the SAME real access token this file's
+// normal login path already stores, through the exact same setToken() --
+// no new token format, no new login method. Resolves to whether it found
+// one; never throws.
+export async function attemptSsoHydrate(): Promise<boolean> {
+  if (API_MODE !== 'ems' || token) return !!token
+  try {
+    const response = await fetch(`${EMS_BASE}/auth/sso`, { credentials: 'include' })
+    if (!response.ok) return false
+    const result = (await response.json()) as LoginResult
+    setToken(result.accessToken)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// claude_prompt.txt (this round): logout must also clear the shared
+// cookie server-side -- otherwise the next direct visit here (or to any
+// other app sharing this login) would silently sign back in via
+// attemptSsoHydrate() moments later. Best-effort: the caller clears its
+// own local token regardless of whether this resolves.
+export async function logoutSso(): Promise<void> {
+  if (API_MODE !== 'ems') return
+  try {
+    await fetch(`${EMS_BASE}/auth/logout`, { method: 'POST', credentials: 'include' })
+  } catch {
+    // best-effort
+  }
+}
+
 let unauthorizedHandler: (() => void) | null = null
 export function setUnauthorizedHandler(fn: (() => void) | null): void {
   unauthorizedHandler = fn
@@ -183,17 +221,30 @@ export type LoginResult = {
 // Cost & Profit report (claude_prompt.txt) -- mirrors
 // ems-backend's cost-profit-calculator.ts output shape exactly.
 export type CostProfitTotals = {
-  revenueExVat: number
-  revenueCosted: number
+  // claude_prompt.txt (this round, "revenue = stored total due"): no longer
+  // computed from lines -- at quotation level this is simply the stored
+  // `sales.quotations.total` (nullable: a quotation with no stored total
+  // shows "--" and is excluded from sums, but still listed). At project/
+  // grand level this is the plain sum of member quotations' revenue
+  // (null treated as a 0 contribution), so it's never null there in
+  // practice. `revenueCostedIncVat` is gone -- there is no "line-costed
+  // revenue" concept any more (profit = revenue - cost directly).
+  revenueIncVat: number | null
+  // Total cost = Σ costed part/stock cost + Σ shipping cost + Σ import tax
+  // -- unchanged from the prior round.
   costQuoted: number
   costBank: number
-  profitQuoted: number
-  profitBank: number
+  // claude_prompt.txt: "profit = revenue (stored total) - cost" -- null
+  // whenever revenue is null (no replacement computation).
+  profitQuoted: number | null
+  profitBank: number | null
   bufferGain: number
   linesWithoutCost: number
-  // claude_prompt.txt ("Cost & Profit report adjustments"): import tax is a
-  // pass-through, excluded from every other total above.
+  // claude_prompt.txt (this round): informational only now -- shipping and
+  // import tax ARE counted in revenue/cost/profit/margin above; these two
+  // fields carry the subtotals the Revenue KPI sub-line needs.
   passThroughImportTax: number
+  passThroughShipping: { cost: number; priceIncVat: number }
 }
 export type CostProfitLine = {
   kind: 'part' | 'stock' | 'shipping' | 'import_tax' | 'ctl' | 'discount'
@@ -203,11 +254,19 @@ export type CostProfitLine = {
   unitCostFc: number | null
   markupPercent: number | null
   unitPriceIncVat: number | null
-  revenueExVat: number
+  // claude_prompt.txt (this round): renamed from `revenueExVat` -- always
+  // the VAT-inclusive amount now. `passThrough` is gone -- shipping/import
+  // tax rows are still grouped into the page's separate reference block,
+  // but purely by `kind`, not by a numeric exclusion flag (they now count
+  // in every total).
+  revenueIncVat: number
   costQuoted: number | null
   costBank: number | null
   costKnown: boolean
-  passThrough?: boolean
+  // claude_prompt.txt ("Cost & Profit report — shipping/import tax as
+  // reference rows"): per-item import tax ('part' lines only; null for
+  // 'stock' lines and every other kind, or when the lot has no import tax).
+  importTaxAmount: number | null
 }
 export type CostProfitGroup = {
   kind: 'external' | 'stock' | 'other'
@@ -221,11 +280,56 @@ export type CostProfitGroup = {
   bufferPercent: number | null
   exchangeRateDate: string | null
   bankRateMissing: boolean
+  // claude_prompt.txt ("Cost & Profit report — shipping/import tax as
+  // reference rows"): raw transfer fee (THB) -- used to build the
+  // reference block's shipping sub-text without re-parsing the line name.
+  transferFee: number | null
   lines: CostProfitLine[]
 }
 // claude_prompt.txt ("Cost & Profit report display improvements"): null
 // when there is no discount on this quotation.
 export type CostProfitDiscount = { amountIncVat: number; percentOfPartsSubtotal: number } | null
+
+// claude_prompt.txt ("... discount-price table, Excel basis"): "what if
+// this quotation's items AND shipping were discounted d%, Excel-style" --
+// always present now (previously null when the quotation had its own
+// discount; this round's text makes it always present, based on prices
+// BEFORE the quotation's own discount, as in Excel).
+export type CostProfitDiscountScenario = {
+  discountPercent: number
+  totalPriceIncVat: number
+  profit: number
+  profitExcelBasis: number
+  margin: number
+  // claude_prompt.txt ("Cost & Profit report: two totals, numbers equal to
+  // the Excel sheet"): additive fields for the discount table's new
+  // columns -- Quotation total = revenue + shipping charged + import tax
+  // (import tax undiscounted); Revenue = goods price x (1-d); Cost is the
+  // quotation's own two-totals Cost, constant across every row, carried in
+  // both basis variants here (unlike the five fields above, which stay
+  // quoted-basis-only, unchanged).
+  quotationTotal: number
+  revenue: number
+  costQuoted: number
+  costBank: number
+  profitQuoted: number
+  profitBank: number
+  marginQuoted: number
+  marginBank: number
+}
+
+// claude_prompt.txt ("... two totals"): the report page's own
+// Quotation-total/Revenue/Cost/Profit bundle -- kept separate from
+// CostProfitTotals (which the dashboard reads unchanged) so this page can
+// show its own two totals without affecting the dashboard's numbers.
+export type CostProfitTwoTotals = {
+  quotationTotal: number | null
+  revenue: number
+  costQuoted: number
+  costBank: number
+  profitQuoted: number
+  profitBank: number
+}
 
 export type CostProfitQuotation = {
   id: string
@@ -234,8 +338,25 @@ export type CostProfitQuotation = {
   statusDate: string
   statusDateEstimated: boolean
   totals: CostProfitTotals
-  reconcile: { headerTotal: number; computedIncVat: number; diff: number }
+  twoTotals: CostProfitTwoTotals
+  // claude_prompt.txt: "keep reconcile exactly as it is" -- unchanged in
+  // meaning; widened to `| null` since the stored total it compares
+  // against can itself be null.
+  reconcile: { headerTotal: number | null; computedIncVat: number; diff: number | null }
   discount: CostProfitDiscount
+  // claude_prompt.txt ("show the discount percentage..."): straight
+  // pass-through of the stored `discount_value` column -- never reused
+  // from, or merged into, `discount.percentOfPartsSubtotal` above (that
+  // stays a derived figure; this is the raw stored percent, read as-is).
+  discountPercent: number | null
+  discountScenarios: CostProfitDiscountScenario[]
+  // claude_prompt.txt ("... Excel basis"): total selling price inc. VAT
+  // (items + shipping, before the quotation's own discount) minus total
+  // cost (items + shipping cost). Import tax excluded. Two variants,
+  // mirroring totals.profitQuoted/profitBank, so the page's existing
+  // Quoted/Bank toggle drives this card the same way it drives Profit.
+  profitExcelBasisQuoted: number
+  profitExcelBasisBank: number
   groups: CostProfitGroup[]
 }
 export type CostProfitProject = {
@@ -243,13 +364,44 @@ export type CostProfitProject = {
   name: string
   clientName: string
   totals: CostProfitTotals
+  twoTotals: CostProfitTwoTotals
+  profitExcelBasisQuoted: number
+  profitExcelBasisBank: number
   quotations: CostProfitQuotation[]
 }
 export type CostProfitReport = {
   month: string
   statuses: ('accepted' | 'sent')[]
   totals: CostProfitTotals
+  twoTotals: CostProfitTwoTotals
+  profitExcelBasisQuoted: number
+  profitExcelBasisBank: number
   projects: CostProfitProject[]
+}
+
+// claude_prompt.txt ("... monthly Dashboard"), 1.2 -- mirrors
+// ems-backend's cost-profit-calculator.ts MonthlyCostProfitReport exactly.
+export type CostProfitMonthlySummary = {
+  month: string
+  quotationCount: number
+  revenue: number
+  cost: number
+  profit: number
+  margin: number | null
+}
+export type CostProfitMonthlyProjectSummary = {
+  projectName: string
+  revenue: number
+  cost: number
+  profit: number
+  margin: number | null
+}
+export type CostProfitMonthlyReport = {
+  month: string
+  months: CostProfitMonthlySummary[]
+  averageMargin: number | null
+  previousMonthMargin: number | null
+  projects: CostProfitMonthlyProjectSummary[]
 }
 
 export const api = {
@@ -281,9 +433,16 @@ export const api = {
 
   listExchangeRates: (date: string): Promise<unknown[]> => request(exchangeRateUrl(date)),
 
+  // claude_prompt.txt (this round): `credentials: 'include'` added -- this
+  // is the response that sets the shared `ems_sso` cookie (see
+  // ems-backend's AuthController.login()); without it the browser drops
+  // the Set-Cookie header on this cross-origin response.
   login: (email: string, password: string): Promise<LoginResult> =>
-    request(`${EMS_BASE}/auth/login`, { method: 'POST', body: JSON.stringify({ email, password }) }),
+    request(`${EMS_BASE}/auth/login`, { method: 'POST', body: JSON.stringify({ email, password }), credentials: 'include' }),
 
   getCostProfit: (month: string, statuses: ('accepted' | 'sent')[]): Promise<CostProfitReport> =>
     request(`${EMS_BASE}/sales/reports/cost-profit?month=${encodeURIComponent(month)}&statuses=${statuses.join(',')}`),
+
+  getCostProfitMonthly: (month: string, months = 7): Promise<CostProfitMonthlyReport> =>
+    request(`${EMS_BASE}/sales/reports/cost-profit/monthly?month=${encodeURIComponent(month)}&months=${months}`),
 }

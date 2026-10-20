@@ -25,7 +25,7 @@ import {
 import QuotationView from './pages/QuotationView'
 import QuotationList from './pages/QuotationList'
 import LoginScreen from './pages/LoginScreen'
-import { api, EMS_FRONTEND_URL, getToken, setToken, setUnauthorizedHandler, type Company } from './services/api'
+import { api, attemptSsoHydrate, EMS_FRONTEND_URL, getToken, logoutSso, setToken, setUnauthorizedHandler, type Company } from './services/api'
 import {
   CTL_CONFIG,
   DEFAULT_LABOUR_STAFF,
@@ -139,6 +139,11 @@ function App() {
   const [noteDirty, setNoteDirty] = useState(false)
 
   const [loggedIn, setLoggedIn] = useState(() => api.mode !== 'ems' || !!getToken())
+  // claude_prompt.txt ("SSO: opening a direct link to another app asks for
+  // login again"): true only while a direct/bookmarked/pasted visit (no
+  // local token yet) is still waiting on the one-time SSO-bridge check
+  // below -- keeps LoginScreen from flashing before that check resolves.
+  const [checkingSso, setCheckingSso] = useState(() => api.mode === 'ems' && !getToken())
   const [companies, setCompanies] = useState<Company[]>([]);
   const [companyId, setCompanyId] = useState('');
 
@@ -154,9 +159,29 @@ function App() {
     return () => setUnauthorizedHandler(null)
   }, [])
 
+  // claude_prompt.txt (this round): a direct visit here never carries the
+  // `#sso=` fragment the EMS button/link appends -- this is the fix. Runs
+  // once; if the browser holds a valid session in another app that shares
+  // this login, the shared cookie signs this tab in with no login page
+  // shown, landing on whatever this page already renders (no redirect, so
+  // the original URL is never lost).
+  useEffect(() => {
+    if (api.mode !== 'ems' || loggedIn) return
+    let cancelled = false
+    attemptSsoHydrate().then((ok) => {
+      if (cancelled) return
+      if (ok) setLoggedIn(true)
+      setCheckingSso(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [loggedIn])
+
   const handleLogout = useCallback(() => {
     setToken(null)
     setLoggedIn(false)
+    void logoutSso()
     window.location.href = EMS_FRONTEND_URL
   }, [])
 
@@ -1079,6 +1104,11 @@ function App() {
   }, [])
 
   if (!loggedIn) {
+    // claude_prompt.txt (this round): wait for the one-time SSO-bridge
+    // check (above) before showing the login page -- "if there is no
+    // valid session anywhere, show the normal login page exactly as now"
+    // means after checking, not instead of checking.
+    if (checkingSso) return null
     return <LoginScreen onLoggedIn={() => setLoggedIn(true)} />
   }
 
@@ -1927,7 +1957,7 @@ function App() {
             <div className="section-header">
               <div>
                 <h2>Note</h2>
-                <p>Shown on the PDF — edit freely</p>
+                <p>Shown on the PDF — click the box to edit</p>
               </div>
 
               <button
@@ -1946,15 +1976,18 @@ function App() {
               </p>
             )}
 
-            <textarea
-              className="quotation-note-textarea"
-              value={noteText}
-              onChange={(e) => {
-                setNoteText(e.target.value)
-                setNoteDirty(true)
-              }}
-              rows={5}
-            />
+            <div className="quotation-note-editor">
+              <textarea
+                className="quotation-note-textarea"
+                value={noteText}
+                onChange={(e) => {
+                  setNoteText(e.target.value)
+                  setNoteDirty(true)
+                }}
+                rows={5}
+                placeholder="Type quotation notes here…"
+              />
+            </div>
           </section>
 
           <section className="summary-card">
